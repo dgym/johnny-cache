@@ -169,13 +169,6 @@ class KeyGen(object):
             db = db[0:68] + self.gen_key(db[68:])
         return '%s_%s_table_%s' % (self.prefix, db, table)
 
-    def gen_multi_key(self, values, db='default'):
-        """Takes a list of generations (not table keys) and returns a key."""
-        db = settings.DB_CACHE_KEYS[db]
-        if db and len(db) > 100:
-            db = db[0:68] + self.gen_key(db[68:])
-        return '%s_%s_multi_%s' % (self.prefix, db, self.gen_key(*values))
-
     @staticmethod
     def _convert(x):
         if isinstance(x, unicode):
@@ -229,13 +222,7 @@ class KeyHandler(object):
         generations = []
         for table in tables:
             generations.append(self.get_single_generation(table, db))
-        key = self.keygen.gen_multi_key(generations, db)
-        val = self.cache_backend.get(key, None, db)
-        #if local.get('in_test', None): print str(val).ljust(32), key
-        if val == None:
-            val = self.keygen.random_generator()
-            self.cache_backend.set(key, val, settings.MIDDLEWARE_SECONDS, db)
-        return val
+        return self.keygen.gen_key(*generations)
 
     def invalidate_table(self, table, db='default'):
         """Invalidates a table's generation and returns a new one
