@@ -3,6 +3,7 @@
 
 """Tests for the QueryCache functionality of johnny."""
 
+from mock import patch
 import django
 from django.conf import settings
 from django.db import connection
@@ -10,9 +11,12 @@ try:
     from django.db import connections
 except:
     connections = None
+from django.core.cache.backends.locmem import LocMemCache
 from johnny import middleware
 from johnny import settings as johnny_settings
+from johnny.transaction import TransactionCache
 import base
+
 
 try:
     any
@@ -955,9 +959,158 @@ class TransactionManagerTestCase(base.TransactionJohnnyTestCase):
         # The key-value pair is moved into 'trans_sids' item of localstore.
         tm._create_savepoint('savepoint1')
         
-        # We then commit all the savepoints (i.e. only one in this case)
-        # The items stored in 'trans_sids' should be moved back to the
-        # top-level dictionary of our localstore
-        tm._commit_all_savepoints()
+        # We then commit all the savepoints, which should write the changes.
+        tm.commit()
         # And this checks if it actually happened.
-        self.failUnless(table_key in tm.local)
+        backend = johnny_settings._get_backend()
+        self.failUnless(backend.get(table_key))
+
+
+class TransactionCacheTestCase(base.JohnnyTestCase):
+    def setUp(self):
+        self.backend = LocMemCache('', {})
+        self.cache = TransactionCache(self.backend)
+
+    def test_get(self):
+        self.backend.set('a', '1')
+        self.assertEqual(self.cache.get('a'), '1')
+        self.assertIsNone(self.cache.get('missing'))
+
+    def test_local_caching(self):
+        self.backend.set('a', '1')
+        self.assertEqual(self.cache.get('a'), '1')
+        self.backend.clear()
+        self.assertEqual(self.cache.get('a'), '1')
+
+    def test_get_many_local_caching(self):
+        self.backend.set('a', '1')
+        self.backend.set('b', '2')
+        self.assertEqual(
+            self.cache.get_many(['a', 'b', 'c']),
+            {'a': '1', 'b': '2'},
+        )
+        self.backend.clear()
+        self.backend.set('c', '3')
+        self.assertEqual(
+            self.cache.get_many(['a', 'b', 'c']),
+            {'a': '1', 'b': '2'},
+        )
+
+    def test_get_many_looks_up_missing(self):
+        self.cache.get('a')
+        with patch.object(self.backend, 'get_many') as get_many:
+            self.cache.get_many(['a', 'b', 'c'])
+            get_many.assert_called_with(['b', 'c'])
+
+    def test_set_get(self):
+        self.backend.set('a', '1')
+        self.assertEqual(self.cache.get('a'), '1')
+        self.cache.set('a', '2')
+        self.assertEqual(self.cache.get('a'), '2')
+        self.assertEqual(self.backend.get('a'), '1')
+
+    def test_set_many(self):
+        self.cache.set_many({'a': '1', 'b': '2'})
+        self.assertEqual(self.cache.get('a'), '1')
+        self.assertEqual(self.cache.get('b'), '2')
+
+    def test_delete_get(self):
+        self.backend.set('a', '1')
+        self.assertEqual(self.cache.get('a'), '1')
+        self.cache.delete('a')
+        self.assertIsNone(self.cache.get('a'))
+        self.assertEqual(self.backend.get('a'), '1')
+
+    def test_delete_many(self):
+        self.backend.set_many({'a': '1', 'b': '2'})
+        self.cache.delete_many(['a', 'b'])
+        self.assertIsNone(self.cache.get('a'))
+        self.assertIsNone(self.cache.get('b'))
+
+    def test_rollback(self):
+        self.backend.set('a', '1')
+        self.assertEqual(self.cache.get('a'), '1')
+        self.backend.set('a', '2')
+        self.assertEqual(self.cache.get('a'), '1')
+        self.cache.rollback()
+        self.assertEqual(self.cache.get('a'), '2')
+
+    def test_commit(self):
+        self.backend.set('a', '1')
+        self.backend.set('b', '2')
+        self.cache.set('a', '3')
+        self.cache.delete('b')
+        self.assertEqual(self.backend.get('a'), '1')
+        self.assertEqual(self.backend.get('b'), '2')
+        self.cache.commit()
+        self.assertEqual(self.backend.get('a'), '3')
+        self.assertIsNone(self.backend.get('b'))
+
+    def test_rollback_savepoint(self):
+        self.cache.set('a', '1')
+        self.cache.savepoint('sp1')
+        self.cache.set('a', '2')
+        self.cache.savepoint('sp2')
+        self.cache.set('a', '3')
+
+        self.assertEqual(self.cache.get('a'), '3')
+        self.cache.rollback_savepoint('sp2')
+        self.assertEqual(self.cache.get('a'), '2')
+        self.cache.rollback_savepoint('sp1')
+        self.assertEqual(self.cache.get('a'), '1')
+
+        self.assertRaises(IndexError, self.cache.rollback_savepoint, 'sp0')
+
+    def test_rollback_savepoint_skip(self):
+        self.cache.set('a', '1')
+        self.cache.savepoint('sp1')
+        self.cache.set('a', '2')
+        self.cache.savepoint('sp2')
+        self.cache.set('a', '3')
+
+        self.assertEqual(self.cache.get('a'), '3')
+        self.cache.rollback_savepoint('sp1')
+        self.assertEqual(self.cache.get('a'), '1')
+
+        self.assertRaises(IndexError, self.cache.rollback_savepoint, 'sp2')
+
+    def test_rollback_savepoint_same_name(self):
+        self.cache.set('a', '1')
+        self.cache.savepoint('sp')
+        self.cache.set('a', '2')
+        self.cache.savepoint('sp')
+        self.cache.set('a', '3')
+
+        self.assertEqual(self.cache.get('a'), '3')
+        self.cache.rollback_savepoint('sp')
+        self.assertEqual(self.cache.get('a'), '2')
+        self.cache.rollback_savepoint('sp')
+        self.assertEqual(self.cache.get('a'), '1')
+
+        self.assertRaises(IndexError, self.cache.rollback_savepoint, 'sp')
+
+    def test_commit_savepoint(self):
+        self.cache.set('a', '1')
+        self.cache.savepoint('sp1')
+        self.cache.set('a', '2')
+
+        self.assertEqual(self.cache.get('a'), '2')
+        self.cache.commit_savepoint('sp1')
+        self.assertEqual(self.cache.get('a'), '2')
+
+        self.assertRaises(IndexError, self.cache.rollback_savepoint, 'sp1')
+
+    def test_commit_savepoint_same_name(self):
+        self.cache.set('a', '1')
+        self.cache.savepoint('sp')
+        self.cache.set('a', '2')
+        self.cache.savepoint('sp')
+        self.cache.set('a', '3')
+
+        self.assertEqual(self.cache.get('a'), '3')
+        self.cache.commit_savepoint('sp')
+        self.assertEqual(self.cache.get('a'), '3')
+        self.cache.rollback_savepoint('sp')
+        self.assertEqual(self.cache.get('a'), '1')
+
+        self.assertRaises(IndexError, self.cache.rollback_savepoint, 'sp')

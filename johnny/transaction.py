@@ -9,16 +9,149 @@ except:
 from johnny.decorators import wraps, available_attrs
 
 
+class TransactionCache(object):
+    '''
+    TransactionCache is a wrapper around a cache backend that
+    is transaction aware.
+
+    It caches all values locally, and should therefore be flushed
+    after each request.
+
+    All changes are stored locally. On commit they are sent to
+    the cache backend (e.g. memcached). On rollback the changes
+    are discarded.
+
+    Save points are also handled.
+    '''
+    NOT_THERE = object()
+
+    def __init__(self, cache_backend):
+        from johnny import cache, settings
+
+        self.timeout = settings.MIDDLEWARE_SECONDS
+        self.cache_backend = cache_backend
+
+        # The cache is made up of many layers of dictionaries.
+        # Each layer's values supersede those of the layers below.
+        #
+        # The first layer is the local cache which stores any
+        # results retreived from the cache_backend.
+        #
+        # The second layer is keeps any changes made during a transaction.
+        #
+        # Subsequent layers are used by savepoints, so the changes can be
+        # dropped on savepoint rollback.
+        self.local_cache = {}
+        self.stack = [{}, self.local_cache]
+        self.savepoints = []
+
+    def get(self, key, default=None):
+        for layer in self.stack:
+            if key in layer:
+                value = layer[key]
+                if value is self.NOT_THERE:
+                    return default
+                return value
+        value = self.cache_backend.get(key, self.NOT_THERE)
+        self.local_cache[key] = value
+        if value is self.NOT_THERE:
+            return default
+        return value
+
+    def get_many(self, keys):
+        results = {}
+        lookup = []
+        for key in keys:
+            for layer in self.stack:
+                if key in layer:
+                    value = layer[key]
+                    if value is self.NOT_THERE:
+                        break
+                    results[key] = value
+                    break
+            else:
+                lookup.append(key)
+        if lookup:
+            vars = self.cache_backend.get_many(lookup)
+            for key in lookup:
+                if key in vars:
+                    self.local_cache[key] = vars[key]
+                    results[key] = vars[key]
+                else:
+                    self.local_cache[key] = self.NOT_THERE
+        return results
+
+    def set(self, key, value, timeout=None):
+        self.stack[0][key] = value
+
+    def set_many(self, vars, timeout=None):
+        self.stack[0].update(vars)
+
+    def delete(self, key):
+        self.stack[0][key] = self.NOT_THERE
+
+    def delete_many(self, keys):
+        for key in keys:
+            self.stack[0][key] = self.NOT_THERE
+
+    def rollback(self):
+        self.local_cache.clear()
+        self.stack[:-1] = [{}]
+
+    def commit(self):
+        # Send the changes on the stack, not including the first layer
+        # as that is the local read cache.
+        stack = self.stack[:-1]
+        stack.reverse()
+
+        vars = {}
+        for layer in stack:
+            vars.update(layer)
+
+        deleted = []
+        for key, value in vars.iteritems():
+            if value is self.NOT_THERE:
+                deleted.append(key)
+        for key in deleted:
+            del vars[key]
+
+        if vars:
+            self.cache_backend.set_many(vars, self.timeout)
+        if deleted:
+            self.cache_backend.delete_many(deleted)
+
+        self.rollback()
+
+    def savepoint(self, name):
+        self.savepoints.insert(0, (name, len(self.stack)))
+        self.stack.insert(0, {})
+
+    def rollback_savepoint(self, name):
+        sp_idx, stack_idx = self._find_savepoint(name)
+        del self.savepoints[:sp_idx+1]
+        del self.stack[:-stack_idx]
+
+    def commit_savepoint(self, name):
+        # Commiting a savepoint doesn't do anything to the data,
+        # it just removes the savepoint information.
+        # It is reasonable to combine all the layers up to the
+        # savepoint into a single dictionary, but this isn't
+        # neccessary and may in fact be slower than leaving it
+        # alone.
+        sp_idx, stack_idx = self._find_savepoint(name)
+        del self.savepoints[:sp_idx+1]
+
+    def _find_savepoint(self, name):
+        for sp_idx, (sp, stack_idx) in enumerate(self.savepoints):
+            if sp == name:
+                return sp_idx, stack_idx
+        raise IndexError()
+
+
 class TransactionManager(object):
     """
-    TransactionManager is a wrapper around a cache_backend that is
-    transaction aware.
-
-    If we are in a transaction, it will return the locally cached version.
-
-      * On rollback, it will flush all local caches
-      * On commit, it will push them up to the real shared cache backend
-        (ex. memcached).
+    TransactionManager hooks a TransactionCache into Django's
+    transaction system.
     """
     _patched_var = False
 
@@ -29,28 +162,9 @@ class TransactionManager(object):
         self.prefix = settings.MIDDLEWARE_KEY_PREFIX
 
         self.cache_backend = cache_backend
-        self.local = cache.local
+        self.tx_cache = TransactionCache(self.cache_backend)
         self.keygen = keygen(self.prefix)
         self._originals = {}
-        self._dirty_backup = {}
-
-        self.local['trans_sids'] = {}
-
-    def _get_sid(self, using=None):
-        if 'trans_sids' not in self.local:
-            self.local['trans_sids'] = {}
-        d = self.local['trans_sids']
-        if using is None:
-            using = DEFAULT_DB_ALIAS
-        if using not in d:
-            d[using] = []
-        return d[using]
-
-    def _clear_sid_stack(self, using=None):
-        if using is None:
-            using = DEFAULT_DB_ALIAS
-        if using in self.local.get('trans_sids', {}):
-            del self.local['trans_sids']
 
     def is_managed(self, using=None):
         if django.VERSION[1] < 2:
@@ -58,30 +172,10 @@ class TransactionManager(object):
         return django_transaction.is_managed(using=using)
 
     def get(self, key, default=None, using=None):
-        if self.is_managed(using) and self._patched_var:
-            val = self.local.get(key, None)
-            if val:
-                return val
-            if self._uses_savepoints():
-                val = self._get_from_savepoints(key, using)
-                if val:
-                    return val
-        return self.cache_backend.get(key, default)
+        return self.tx_cache.get(key, default)
 
-    def _get_from_savepoints(self, key, using=None):
-        sids = self._get_sid(using)
-        cp = list(sids)
-        cp.reverse()
-        for sid in cp:
-            if key in self.local[sid]:
-                return self.local[sid][key]
-
-    def _trunc_using(self, using):
-        if using is None:
-            using = DEFAULT_DB_ALIAS
-        if len(using) > 100:
-            using = using[0:68] + self.keygen.gen_key(using[68:])
-        return using
+    def get_many(self, keys, using=None):
+        return self.tx_cache.get_many(keys)
 
     def set(self, key, val, timeout=None, using=None):
         """
@@ -93,31 +187,15 @@ class TransactionManager(object):
         if timeout is None:
             timeout = self.timeout
         if self.is_managed(using=using) and self._patched_var:
-            self.local[key] = val
+            self.tx_cache.set(key, val, timeout)
         else:
             self.cache_backend.set(key, val, timeout)
 
-    def _clear(self, using=None):
-        self.local.clear('%s_%s_*' %
-                         (self.prefix, self._trunc_using(using)))
+    def commit(self, using=None):
+        self.tx_cache.commit()
 
-    def _flush(self, commit=True, using=None):
-        """
-        Flushes the internal cache, either to the memcache or rolls back
-        """
-        if commit:
-            # XXX: multi-set?
-            if self._uses_savepoints():
-                self._commit_all_savepoints(using)
-            c = self.local.mget('%s_%s_*' %
-                                (self.prefix, self._trunc_using(using)))
-            for key, value in c.iteritems():
-                self.cache_backend.set(key, value, self.timeout)
-        else:
-            if self._uses_savepoints():
-                self._rollback_all_savepoints(using)
-        self._clear(using)
-        self._clear_sid_stack(using)
+    def rollback(self, using=None):
+        self.tx_cache.rollback()
 
     def _patched(self, original, commit=True, unless_managed=False):
         @wraps(original, assigned=available_attrs(original))
@@ -127,104 +205,24 @@ class TransactionManager(object):
             # copying behavior of original func
             # if it is an 'unless_managed' version we should do nothing if transaction is managed
             if not unless_managed or not self.is_managed(using=using):
-                self._flush(commit=commit, using=using)
+                if commit:
+                    self.commit(using=using)
+                else:
+                    self.rollback(using=using)
 
         return newfun
 
     def _uses_savepoints(self):
         return connection.features.uses_savepoints
 
-    def _sid_key(self, sid, using=None):
-        if using is not None:
-            prefix = 'trans_savepoint_%s' % using
-        else:
-            prefix = 'trans_savepoint'
-
-        if sid is not None and sid.startswith(prefix):
-            return sid
-        return '%s_%s'%(prefix, sid)
-
     def _create_savepoint(self, sid, using=None):
-        key = self._sid_key(sid, using)
-
-        #get all local dirty items
-        c = self.local.mget('%s_%s_*' %
-                            (self.prefix, self._trunc_using(using)))
-        #store them to a dictionary in the localstore
-        if key not in self.local:
-            self.local[key] = {}
-        for k, v in c.iteritems():
-            self.local[key][k] = v
-        #clear the dirty
-        self._clear(using)
-        #append the key to the savepoint stack
-        sids = self._get_sid(using)
-        sids.append(key)
+        self.tx_cache.savepoint(sid)
 
     def _rollback_savepoint(self, sid, using=None):
-        sids = self._get_sid(using)
-        key = self._sid_key(sid, using)
-        stack = []
-        try:
-            popped = None
-            while popped != key:
-                popped = sids.pop()
-                stack.insert(0, popped)
-            #delete items from localstore
-            for i in stack:
-                del self.local[i]
-            #clear dirty
-            self._clear(using)
-        except IndexError:
-            #key not found, don't delete from localstore, restore sid stack
-            for i in stack:
-                sids.insert(0, i)
+        self.tx_cache.rollback_savepoint(sid)
 
     def _commit_savepoint(self, sid, using=None):
-        # commit is not a commit but is in reality just a clear back to that
-        # savepoint and adds the items back to the dirty transaction.
-        key = self._sid_key(sid, using)
-        sids = self._get_sid(using)
-        stack = []
-        try:
-            popped = None
-            while popped != key:
-                popped = sids.pop()
-                stack.insert(0, popped)
-            self._store_dirty(using)
-            for i in stack:
-                for k, v in self.local[i].iteritems():
-                    self.local[k] = v
-                del self.local[i]
-            self._restore_dirty(using)
-        except IndexError:
-            for i in stack:
-                sids.insert(0, i)
-
-    def _commit_all_savepoints(self, using=None):
-        sids = self._get_sid(using)
-        if sids:
-            self._commit_savepoint(sids[0], using)
-
-    def _rollback_all_savepoints(self, using=None):
-        sids = self._get_sid(using)
-        if sids:
-            self._rollback_savepoint(sids[0], using)
-
-    def _store_dirty(self, using=None):
-        c = self.local.mget('%s_%s_*' %
-                            (self.prefix, self._trunc_using(using)))
-        backup = 'trans_dirty_store_%s' % self._trunc_using(using)
-        self.local[backup] = {}
-        for k, v in c.iteritems():
-            self.local[backup][k] = v
-        self._clear(using)
-
-    def _restore_dirty(self, using=None):
-        backup = 'trans_dirty_store_%s' % self._trunc_using(using)
-        for k, v in self.local.get(backup, {}).iteritems():
-            self.local[k] = v
-        del self.local[backup]
+        self.tx_cache.commit_savepoint(sid)
 
     def _savepoint(self, original):
         @wraps(original, assigned=available_attrs(original))

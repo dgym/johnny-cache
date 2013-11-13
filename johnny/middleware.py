@@ -42,9 +42,11 @@ class LocalStoreClearMiddleware(object):
     """
     def process_exception(self, *args, **kwargs):
         cache.local.clear()
+        cache.get_backend().cache_backend.rollback()
 
     def process_response(self, req, resp):
         cache.local.clear()
+        cache.get_backend().cache_backend.rollback()
         return resp
 
 
