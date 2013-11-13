@@ -219,6 +219,10 @@ class KeyHandler(object):
     def get_multi_generation(self, tables, db='default'):
         """Takes a list of table names and returns an aggregate
         value for the generation"""
+        self.cache_backend.get_many([
+            self.keygen.gen_table_key(table, db)
+            for table in tables
+        ])
         generations = []
         for table in tables:
             generations.append(self.get_single_generation(table, db))
