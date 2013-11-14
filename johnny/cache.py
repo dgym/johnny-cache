@@ -16,6 +16,7 @@ from johnny.decorators import wraps, available_attrs
 from transaction import TransactionManager
 
 import django
+from django.db import models
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models.signals import post_save, post_delete
 from django.db.models.sql import compiler
@@ -79,6 +80,17 @@ def disable():
     get_backend().unpatch()
 
 patch,unpatch = enable,disable
+
+def prefetch_generations(db='default'):
+    backend = get_backend()
+    keyhandler = backend.keyhandler
+    keys = set()
+    for model in models.get_models(include_auto_created=True):
+        table = model._meta.db_table
+        key = keyhandler.keygen.gen_table_key(table, db)
+        keys.add(key)
+    keys = list(keys)
+    keyhandler.cache_backend.get_many(keys)
 
 def resolve_table(x):
     """Return a table name for x, where x is either a model instance or a string."""

@@ -29,6 +29,10 @@ class QueryCacheMiddleware(object):
             self.query_cache_backend.patch()
             self.installed = True
 
+    def process_request(self, *args):
+        if settings.PREFETCH_GENERATIONS:
+            cache.prefetch_generations()
+
     def unpatch(self):
         self.query_cache_backend.unpatch()
         self.query_cache_backend.flush_query_cache()

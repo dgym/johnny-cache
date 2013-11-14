@@ -24,6 +24,8 @@ CACHE_BACKEND = getattr(settings, 'JOHNNY_CACHE_BACKEND',
 
 CACHES = getattr(settings, 'CACHES', {})
 
+PREFETCH_GENERATIONS = getattr(settings, 'JOHNNY_PREFETCH_GENERATIONS', True)
+
 
 def _get_backend():
     """
