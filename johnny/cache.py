@@ -11,8 +11,10 @@ except ImportError:
 
 import localstore
 import signals
+import query
 from johnny import settings
 from johnny.decorators import wraps, available_attrs
+from localcache import LocalCache
 from transaction import TransactionManager
 
 import django
@@ -290,7 +292,8 @@ class QueryCacheBackend(object):
             self.kh_class = KeyHandler
 
         if cache_backend:
-            self.cache_backend = TransactionManager(cache_backend,
+            self.local_cache = LocalCache(cache_backend)
+            self.cache_backend = TransactionManager(self.local_cache,
                                                     self.kg_class)
             self.keyhandler = self.kh_class(self.cache_backend,
                                             self.kg_class, self.prefix)
@@ -336,6 +339,11 @@ class QueryCacheBackend(object):
                 key = self.keyhandler.sql_key(gen_key, sql, params,
                                               cls.get_ordering(),
                                               result_type, db)
+                # The local cache needs to remove stale entries
+                # if the generation has changed.
+                self.local_cache.check_generation(tables, gen_key)
+                if settings.CACHE_LOCALLY and getattr(cls.query, '_cache_locally', False):
+                    self.local_cache.watch(key)
                 val = self.cache_backend.get(key, NotInCache(), db)
 
             if not isinstance(val, NotInCache):
@@ -469,3 +477,6 @@ class QueryCacheBackend(object):
         for table in tables:
             # we want this to just work, so invalidate even things in blacklist
             self.keyhandler.invalidate_table(table)
+
+
+query.patch()

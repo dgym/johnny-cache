@@ -3,6 +3,8 @@
 
 """Extra johnny utilities."""
 
+from inspect import getmembers, ismethod
+
 from johnny.cache import get_backend, local, patch, unpatch
 from johnny.decorators import wraps, available_attrs
 
@@ -59,3 +61,15 @@ def celery_task_wrapper(f):
 # backwards compatible alias
 johnny_task_wrapper = celery_task_wrapper
 
+
+# Monkey patching adapted from django-cacheops
+class MonkeyProxy(object):
+    pass
+
+
+def monkey_mix(cls, mixin):
+    cls._no_monkey = MonkeyProxy()
+    for name, method in getmembers(mixin, ismethod):
+        if hasattr(cls, name):
+            setattr(cls._no_monkey, name, getattr(cls, name))
+        setattr(cls, name, method.im_func)

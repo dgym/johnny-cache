@@ -14,6 +14,8 @@ http://code.djangoproject.com/ticket/7835#comment:21
 from localstore import LocalStoreTest
 from cache import *
 from web import *
+from query import *
+from localcache import *
 
 from testapp.models import *
 
