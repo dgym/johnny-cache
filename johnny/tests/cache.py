@@ -27,7 +27,7 @@ except NameError:
         return False
 
 # put tests in here to be included in the testing suite
-__all__ = ['MultiDbTest', 'SingleModelTest', 'MultiModelTest', 'TransactionSupportTest', 'BlackListTest', 'TransactionManagerTestCase']
+__all__ = ['MultiDbTest', 'SingleModelTest', 'MultiModelTest', 'TransactionSupportTest', 'BlackListTest', 'TransactionManagerTestCase', 'TransactionCacheTestCase']
 
 def _pre_setup(self):
     self.saved_DISABLE_SETTING = getattr(johnny_settings, 'DISABLE_QUERYSET_CACHE', False)
@@ -970,6 +970,7 @@ class TransactionCacheTestCase(base.JohnnyTestCase):
     def setUp(self):
         self.backend = LocMemCache('', {})
         self.cache = TransactionCache(self.backend)
+        self.cache.timeout = 1000
 
     def test_get(self):
         self.backend.set('a', '1')
