@@ -29,6 +29,7 @@ class LocalCache(object):
 
         for key in expired:
             del self.stored[key]
+            self.watched.discard(key)
 
         self.generations[tables_key] = generation
 
