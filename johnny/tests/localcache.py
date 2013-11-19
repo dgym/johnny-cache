@@ -54,7 +54,6 @@ class LocalCacheTestCase(base.JohnnyTestCase):
         self.cache.get('prefix_t1a.a')
         self.cache.get('prefix_t1a.b')
         self.cache.get('prefix_t2a.a')
-        self.cache.get('prefix_t2a.b')
 
         self.assertEqual(len(self.cache.watched), 4)
         self.cache.check_generation(['t1'], 't1b')

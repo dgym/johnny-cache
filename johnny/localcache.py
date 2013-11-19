@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from itertools import chain
+
 
 class LocalCache(object):
     '''
@@ -21,14 +23,14 @@ class LocalCache(object):
         if old_gen == generation:
             return
 
-        expired = []
-        for key in self.stored:
+        expired = set()
+        for key in chain(self.stored, self.watched):
             gen = key.rsplit('_', 1)[1].split('.')[0]
             if gen == old_gen:
-                expired.append(key)
+                expired.add(key)
 
         for key in expired:
-            del self.stored[key]
+            self.stored.pop(key, None)
             self.watched.discard(key)
 
         self.generations[tables_key] = generation
