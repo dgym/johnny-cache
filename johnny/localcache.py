@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-from itertools import chain
-
 
 class LocalCache(object):
     '''
@@ -11,11 +9,13 @@ class LocalCache(object):
     Knows enough about the generation scheme to remove all stale
     items when a generation changes.
     '''
+
+    NOT_THERE = object()
+
     def __init__(self, cache_backend):
         self.cache_backend = cache_backend
         self.generations = {}
         self.stored = {}
-        self.watched = set()
 
     def check_generation(self, tables, generation):
         tables_key = ','.join(sorted(tables))
@@ -23,30 +23,63 @@ class LocalCache(object):
         if old_gen == generation:
             return
 
-        expired = set()
-        for key in chain(self.stored, self.watched):
+        expired = []
+        for key in self.stored:
             gen = key.rsplit('_', 1)[1].split('.')[0]
             if gen == old_gen:
-                expired.add(key)
+                expired.append(key)
 
         for key in expired:
-            self.stored.pop(key, None)
-            self.watched.discard(key)
+            del self.stored[key]
 
         self.generations[tables_key] = generation
 
-    def watch(self, key):
-        self.watched.add(key)
+    def watch(self, key, limit=None):
+        value = self.stored.get(key)
+
+        if value:
+            value['limit'] = limit
+        else:
+            self.stored[key] = {'limit': limit}
 
     def __getattr__(self, key, *args):
         return getattr(self.cache_backend, key, *args)
 
+    def clear(self):
+        for item in self.stored.values():
+            item.pop('value', None)
+        return self.cache_backend.clear()
+
     def get(self, key, default=None):
-        if key in self.stored:
-            return self.stored[key]
+        item = self.stored.get(key)
 
-        value = self.cache_backend.get(key, default)
-        if key in self.watched:
-            self.stored[key] = value
+        if not item:
+            return self.cache_backend.get(key, default)
 
-        return value
+        def real_value(value):
+            if value is self.NOT_THERE:
+                return default
+            return value
+
+        if 'value' in item:
+            return real_value(item['value'])
+
+        value = self.cache_backend.get(key, self.NOT_THERE)
+
+        if item:
+            if item['limit'] is not None:
+                if value is self.NOT_THERE:
+                    count = 0
+                elif isinstance(value, (tuple, list)):
+                    if len(value) > 0 and isinstance(value[0], (tuple, list)):
+                        count = len(value[0])
+                    else:
+                        count = len(value)
+                else:
+                    count = 1
+                if count <= item['limit']:
+                    item['value'] = value
+            else:
+                item['value'] = value
+
+        return real_value(value)

@@ -342,8 +342,16 @@ class QueryCacheBackend(object):
                 # The local cache needs to remove stale entries
                 # if the generation has changed.
                 self.local_cache.check_generation(tables, gen_key)
-                if settings.CACHE_LOCALLY and getattr(cls.query, '_cache_locally', False):
-                    self.local_cache.watch(key)
+                if settings.CACHE_LOCALLY:
+                    if getattr(cls.query, '_cache_locally', False):
+                        self.local_cache.watch(key)
+                    elif (
+                        settings.AUTO_LOCAL_ROWS
+                        and cls.query.low_mark is 0
+                        and cls.query.high_mark is None
+                        and not len(cls.query.where.children)
+                    ):
+                        self.local_cache.watch(key, settings.AUTO_LOCAL_ROWS)
                 val = self.cache_backend.get(key, NotInCache(), db)
 
             if not isinstance(val, NotInCache):

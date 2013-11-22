@@ -26,6 +26,7 @@ CACHES = getattr(settings, 'CACHES', {})
 
 PREFETCH_GENERATIONS = getattr(settings, 'JOHNNY_PREFETCH_GENERATIONS', True)
 CACHE_LOCALLY = getattr(settings, 'JOHNNY_CACHE_LOCALLY', True)
+AUTO_LOCAL_ROWS = getattr(settings, 'JOHNNY_AUTO_LOCAL_ROWS', 50)
 
 
 def _get_backend():
